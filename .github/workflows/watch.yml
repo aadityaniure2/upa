@@ -1,0 +1,70 @@
+# GitHub Actions — free 24/7 Darwin OASIS check
+# Save this file in your repo as:  .github/workflows/watch.yml
+#
+# 1. Create a GitHub repo and upload bupa_slot_watch.py + requirements.txt
+# 2. Put this file at .github/workflows/watch.yml
+# 3. Repo → Settings → Secrets and variables → Actions
+#      TELEGRAM_BOT_TOKEN
+#      TELEGRAM_CHAT_ID
+# 4. Actions tab → enable workflows → Run workflow once to test
+#
+# Use a PUBLIC repo so you don't burn the 2,000 private-minutes quota.
+# Secrets stay hidden even on a public repo. GitHub cron is ~every 10 min
+# (not exact). After 60 days of no repo activity, GitHub pauses schedules.
+
+name: OASIS Darwin watch
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore state + browsers
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            state.json
+            ~/.cache/ms-playwright
+          key: oasis-${{ github.run_id }}
+          restore-keys: |
+            oasis-
+
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Check Jobfit Darwin
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LOCATION_QUERY: Darwin
+          CLINIC_NAME: Jobfit Darwin
+          LOCATION_STATE: NT
+          TARGET_DATE: "2026-11-01"
+          STRATEGY: wizard
+          RUN_ONCE: "1"
+          HEADLESS: "1"
+          TZ_NAME: Australia/Darwin
+        run: python bupa_slot_watch.py --once
+
+      - name: Save state + browsers
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            state.json
+            ~/.cache/ms-playwright
+          key: oasis-${{ github.run_id }}
