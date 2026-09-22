@@ -36,9 +36,9 @@ jobs:
           path: |
             state.json
             ~/.cache/ms-playwright
-          key: oasis-${{ github.run_id }}
+          key: oasisv2-${{ github.run_id }}
           restore-keys: |
-            oasis-
+            oasisv2-
 
       - name: Install Playwright
         run: |
