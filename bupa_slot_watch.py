@@ -215,26 +215,35 @@ _ISO_DATE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 _GAVAIL = re.compile(r"var\s+gAvailDates\s*=\s*\[(.*?)\];", re.S)
 
 
+def _valid_slot_day(day: date) -> bool:
+    """Drop epoch junk and dates too far out (jQuery UI has new Date(1970, 1, 1))."""
+    today = date.today()
+    try:
+        horizon = today.replace(year=today.year + 2)
+    except ValueError:
+        horizon = date(today.year + 2, 3, 1)
+    return today <= day <= horizon
+
+
 def parse_gavail_dates(html: str) -> list[date]:
     """Extract dates from `var gAvailDates = [new Date(y, m, d), ...];`.
 
-    JS months are 0-based. We convert to Python `date` (1-based months).
+    JS months are 0-based. Empty `gAvailDates = []` means no slots — do not
+    fall back to scanning the whole page (that picks up library epoch dates).
     """
     found: list[date] = []
     block = _GAVAIL.search(html)
-    haystack = block.group(1) if block else html
+    if not block:
+        return []
+    haystack = block.group(1)
+    if not haystack.strip():
+        return []
     for year, month0, day in _JS_DATE.findall(haystack):
         try:
             found.append(date(int(year), int(month0) + 1, int(day)))
         except ValueError:
             continue
-    if not found:
-        for iso in _ISO_DATE.findall(html):
-            try:
-                found.append(date.fromisoformat(iso))
-            except ValueError:
-                continue
-    return sorted(set(found))
+    return sorted({d for d in found if _valid_slot_day(d)})
 
 
 def parse_dates_from_json(payload: Any) -> list[date]:
@@ -359,7 +368,7 @@ class Capture:
             body = await response.text()
         except Exception:
             return
-        if "gAvailDates" in body or _JS_DATE.search(body):
+        if "gAvailDates" in body and "AppointmentTime" in url:
             parsed = parse_gavail_dates(body)
             if parsed:
                 log.info("Intercepted gAvailDates from %s → %s", url, parsed[:6])
@@ -372,6 +381,8 @@ class Capture:
             except json.JSONDecodeError:
                 return
             parsed = parse_dates_from_json(payload)
+            if parsed:
+                parsed = [d for d in parsed if _valid_slot_day(d)]
             if parsed:
                 log.info("Intercepted JSON dates from %s → %s", url, parsed[:6])
                 self.dates = sorted(set(self.dates + parsed))
@@ -498,17 +509,32 @@ async def collect_hit(page: Page, capture: Capture) -> SlotHit | None:
     html = await page.content()
     dates = parse_gavail_dates(html)
     if capture.dates:
-        dates = sorted(set(dates + capture.dates))
+        dates = sorted({d for d in dates + capture.dates if _valid_slot_day(d)})
     if not dates:
         # Last-ditch: evaluate the JS global if the page defined it.
         try:
             raw = await page.evaluate(
                 """() => {
-                    if (typeof gAvailDates === 'undefined' || !gAvailDates) return [];
-                    return gAvailDates.map(d => d.toISOString().slice(0, 10));
+                    if (typeof gAvailDates === 'undefined' || !gAvailDates || !gAvailDates.length) return [];
+                    const out = [];
+                    for (const pageDates of gAvailDates) {
+                      const items = Array.isArray(pageDates) ? pageDates : [pageDates];
+                      for (const d of items) {
+                        if (!(d instanceof Date) || isNaN(d.getTime())) continue;
+                        const y = d.getFullYear();
+                        const m = String(d.getMonth() + 1).padStart(2, '0');
+                        const day = String(d.getDate()).padStart(2, '0');
+                        out.push(`${y}-${m}-${day}`);
+                      }
+                    }
+                    return out;
                 }"""
             )
-            dates = [date.fromisoformat(x) for x in raw]
+            dates = [
+                date.fromisoformat(x)
+                for x in raw
+                if isinstance(x, str) and _valid_slot_day(date.fromisoformat(x))
+            ]
         except Exception:
             dates = []
     if not dates:
@@ -537,10 +563,18 @@ async def snapshot(page: Page, tag: str) -> None:
 # ---------------------------------------------------------------------------
 
 def should_alert(hit: SlotHit, last_alerted: str | None) -> bool:
+    if not _valid_slot_day(hit.day):
+        return False
     if hit.day >= TARGET_DATE:
         return False
-    if last_alerted and hit.iso >= last_alerted:
-        return False
+    if last_alerted:
+        try:
+            prev = date.fromisoformat(last_alerted)
+            # Epoch / leftover junk must not block a real future slot.
+            if prev >= date.today() and hit.iso >= last_alerted:
+                return False
+        except ValueError:
+            pass
     return True
 
 
